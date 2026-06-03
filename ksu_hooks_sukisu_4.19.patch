@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SukiSU-Ultra Manual Hook Patch
+Subject: [PATCH] ksu: integrate SukiSU-Ultra v3.2.0 manual hooks for Linux 4.19 non-GKI (SM7225/gauguin)
+
+适用设备  : 红米 Note 9 Pro 5G (gauguin, SM7225)
+内核版本  : Linux 4.19.x QCOM Android (LA.UM.8.x 系列)
+SukiSU版本: v3.2.0 (内部版本号 13377)
+Hook API  : KernelSU v1.x 兼容接口 (非 KernelSU-Next v2 super call)
+
+必须启用的 Kconfig 选项:
+  CONFIG_KSU=y
+  CONFIG_KSU_MANUAL_HOOK=y
+
+Hook 函数由 KernelSU/kernel/core_hook.c 提供:
+  - ksu_execveat_hook            (bool 标志)
+  - ksu_handle_execveat          (execve 主 handler)
+  - ksu_handle_execveat_sucompat (execve 兼容 handler，负责 root 授权检测)
+  - ksu_vfs_read_hook            (bool 标志)
+  - ksu_handle_vfs_read          (vfs_read handler，处理 /proc/self/fd 读取)
+  - ksu_handle_faccessat         (faccessat handler，ksud 通信通道)
+  - ksu_handle_stat              (stat handler，辅助路径检测)
+  - ksu_input_hook               (bool 标志，安全模式触发)
+  - ksu_handle_input_handle_event (输入事件 handler，组合键触发安全模式)
+
+注意: 本 patch 针对 do_execve 为 do_execveat_common 薄封装的 4.19 内核结构。
+      若 git apply 报 context mismatch，build.sh 中内置的 Python 注入脚本
+      (apply_ksu_hooks.py) 将自动作为备选方案执行。
+---
+ drivers/input/input.c |  9 +++++++++
+ fs/exec.c             | 20 ++++++++++++++++++++
+ fs/open.c             | 11 +++++++++++
+ fs/read_write.c       | 11 +++++++++++
+ fs/stat.c             |  9 +++++++++
+ 5 files changed, 60 insertions(+)
+
+diff --git a/fs/exec.c b/fs/exec.c
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1888,6 +1888,16 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_execveat_hook __read_mostly;
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++			void *argv, void *envp, int *flags);
++extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++#endif
++
+ int do_execve(struct filename *filename,
+ 	      const char __user *const __user *__argv,
+ 	      const char __user *const __user *__envp)
+@@ -1896,7 +1906,17 @@ int do_execve(struct filename *filename,
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_execveat_hook))
++		ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, NULL);
++	else
++		ksu_handle_execveat_sucompat((int *)AT_FDCWD, &filename, &argv,
++					     &envp, NULL);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+diff --git a/fs/open.c b/fs/open.c
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -355,6 +355,13 @@ SYSCALL_DEFINE1(chroot, const char __user *, filename)
+ 	return error;
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++			int *mode, int *flags);
++#endif
++
+ long do_faccessat(int dfd, const char __user *filename, int mode)
+ {
+ 	const struct cred *old_cred;
+@@ -364,6 +374,9 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -415,10 +415,21 @@ static inline loff_t file_pos_write(struct file *file, loff_t pos)
+ 	file->f_pos = pos;
+ }
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_vfs_read_hook __read_mostly;
++extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
++			size_t *count_ptr, loff_t **pos);
++#endif
++
+ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
+ {
+ 	ssize_t ret;
+ 
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_vfs_read_hook))
++		ksu_handle_vfs_read(&file, &buf, &count, &pos);
++#endif
++
+ 	if (!(file->f_mode & FMODE_READ))
+ 		return -EBADF;
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -148,12 +148,21 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
+ }
+ EXPORT_SYMBOL(vfs_statx_fd);
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
++#endif
++
+ int vfs_statx(int dfd, const char __user *filename, int flags,
+ 	      struct kstat *stat, u32 request_mask)
+ {
+ 	struct path path;
+ 	int error = -EINVAL;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
++
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flags);
++#endif
++
+ 	if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
+ 		      KSTAT_QUERY_FLAGS))
+ 		return error;
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -385,10 +385,19 @@ static int input_get_disposition(struct input_dev *dev,
+ 	return disposition;
+ }
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_input_hook __read_mostly;
++extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code,
++				int *value);
++#endif
++
+ static void input_handle_event(struct input_dev *dev,
+ 			       unsigned int type, unsigned int code, int value)
+ {
+ 	int disposition = input_get_disposition(dev, type, code, &value);
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_input_hook))
++		ksu_handle_input_handle_event(&type, &code, &value);
++#endif
++
+ 	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
