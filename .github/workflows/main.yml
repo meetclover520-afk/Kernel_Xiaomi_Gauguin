@@ -1,0 +1,51 @@
+name: build kernel (Gauguin SukiSU-Ultra v3.2.0)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检查储存库
+        uses: actions/checkout@v4
+
+      - name: 扩展内存 (配置 Swap Space)
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt-get install -y curl bison flex make binutils dwarves git lld \
+            pahole zip perl gcc python3 python-is-python3 bc libssl-dev libelf-dev \
+            device-tree-compiler kmod binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi gcc-arm-linux-gnueabi ccache lzop libncurses-dev
+
+      - name: 配置 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-kernel-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-
+
+      - name: 下载编译工具链 (Clang 11.1 & GCC 4.9)
+        run: |
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/11.1.0-20220724-release/Clang-11.1.0-20220724.tar.gz
+          mkdir clang
+          tar -zxf Clang-11.1.0-20220724.tar.gz -C clang
+
+      - name: 执行 build.sh
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: 上传 AnyKernel3 刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gauguin_SukiSU-Ultra_v3.2.0_13377
+          path: out/kernel.zip
